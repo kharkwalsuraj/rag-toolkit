@@ -1,0 +1,16 @@
+# environment
+.venv/
+.env
+*.egg-info/
+dist/
+build/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# runtime data created by the library and the CLI
+.rag_data/
+chunks.jsonl

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rag-toolkit"
+version = "0.1.0"
+description = "Retrieval-augmented generation over PDFs: MinerU parsing, structure-aware chunking, local embeddings and reranking, Qdrant, Gemini."
+readme = "README.md"
+license = { file = "LICENSE" }
+keywords = ["rag", "pdf", "mineru", "qdrant", "reranker", "gemini", "retrieval"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.10"
+dependencies = ["requests>=2.31"]
+
+[project.optional-dependencies]
+qdrant = ["qdrant-client>=1.10"]
+embeddings = ["sentence-transformers>=3.0"]
+gemini = ["google-genai>=1.0"]
+all = ["qdrant-client>=1.10", "sentence-transformers>=3.0", "google-genai>=1.0"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "python-dotenv>=1.2.4",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["rag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v -s"  # -s shows the output printed by the example test
