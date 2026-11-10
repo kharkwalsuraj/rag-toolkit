@@ -1,5 +1,3 @@
-"""Turn a MinerU ``content_list_v2`` into retrieval-ready :class:`~rag.models.Chunk` objects."""
-
 from __future__ import annotations
 
 import logging
@@ -8,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional, Tuple, Union
 
-from ..exceptions import ChunkingError
-from ..models import Chunk, ParsedDocument
+from ..exceptions import RAGError
+from ..schemas import Chunk, ParsedDocument
 from . import blocks as B
 from .tables import html_to_text, table_to_chunks
 from .text_utils import clean, split_text
@@ -38,8 +36,6 @@ class ChunkerConfig:
 
 
 class Chunker:
-    """Stateless and reusable: each call to :meth:`chunk` gets its own run state."""
-
     def __init__(self, config: Optional[ChunkerConfig] = None) -> None:
         self.config = config or ChunkerConfig()
 
@@ -51,9 +47,9 @@ class Chunker:
         asset_root: Optional[Union[str, Path]] = None,
     ) -> List[Chunk]:
         if not isinstance(content_list, list):
-            raise ChunkingError("content_list must be a list (expected MinerU content_list_v2.json)")
+            raise RAGError("content_list must be a list (expected MinerU content_list_v2.json)")
         if content_list and not all(isinstance(page, list) for page in content_list):
-            raise ChunkingError(
+            raise RAGError(
                 "Unexpected structure: content_list_v2 is a list of pages, each a list of blocks."
             )
         run = _Run(doc_id, self.config, Path(asset_root) if asset_root else None)
@@ -71,7 +67,6 @@ def chunk_content_list(
     asset_root: Optional[Union[str, Path]] = None,
     config: Optional[ChunkerConfig] = None,
 ) -> List[Chunk]:
-    """Convenience function: ``chunk_content_list(data, "my-doc")``."""
     return Chunker(config).chunk(content_list, doc_id=doc_id, asset_root=asset_root)
 
 
@@ -79,9 +74,8 @@ def chunk_parsed(parsed: ParsedDocument, config: Optional[ChunkerConfig] = None)
     return Chunker(config).chunk(parsed.content_list, doc_id=parsed.doc_id, asset_root=parsed.root)
 
 
+# state for one chunking pass
 class _Run:
-    """Mutable state for one chunking pass."""
-
     def __init__(self, doc_id: str, cfg: ChunkerConfig, asset_root: Optional[Path]) -> None:
         self.doc_id = doc_id
         self.cfg = cfg

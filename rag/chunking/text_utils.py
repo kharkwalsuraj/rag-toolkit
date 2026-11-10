@@ -1,5 +1,3 @@
-"""Text helpers: span flattening, whitespace cleanup, size-bounded splitting."""
-
 from __future__ import annotations
 
 import math
@@ -11,7 +9,6 @@ _SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(\[])")
 
 
 def estimate_tokens(text: str) -> int:
-    """Cheap token estimate: ceil(chars / 4)."""
     return math.ceil(len(text) / 4)
 
 
@@ -23,8 +20,8 @@ def clean(text: str) -> str:
     return text.strip()
 
 
+# join MinerU text spans (lists of {type, content}) into one string
 def spans_to_text(value: Any) -> str:
-    """Flatten MinerU 'spans' (lists of {type, content} dicts) into a string."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -61,8 +58,8 @@ def _hard_split(text: str, max_chars: int) -> List[str]:
     return pieces
 
 
+# split on line or sentence boundaries into pieces of at most max_chars
 def split_text(text: str, max_chars: int) -> List[str]:
-    """Split on line/sentence boundaries into pieces of at most ``max_chars`` (best effort)."""
     text = text.strip()
     if not text:
         return []

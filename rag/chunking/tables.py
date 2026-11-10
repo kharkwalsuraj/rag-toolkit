@@ -1,5 +1,3 @@
-"""HTML table parsing (rowspan/colspan aware) and lossless splitting into Markdown chunks."""
-
 from __future__ import annotations
 
 import html as html_lib
@@ -79,8 +77,8 @@ class _TableParser(HTMLParser):
         self._end_row()
 
 
+# fill rowspan and colspan into a rectangular grid (spanned cells repeat their text)
 def _expand(rows: List[List[_Cell]]) -> List[List[str]]:
-    """Resolve rowspan/colspan into a rectangular grid (spanned text is repeated)."""
     carry: Dict[int, List] = {}  # column -> [text, remaining_rows]
     grid: List[List[str]] = []
     for cells in rows:
@@ -112,7 +110,6 @@ def _expand(rows: List[List[_Cell]]) -> List[List[str]]:
 
 
 def parse_html_table(html: str) -> Tuple[List[List[str]], int]:
-    """Return (grid, number_of_header_rows). Empty grid if no table rows were found."""
     parser = _TableParser()
     parser.feed(html)
     parser.close()
@@ -148,6 +145,7 @@ def _md_row(cells: List[str]) -> str:
     return "| " + " | ".join(c.replace("|", "\\|").replace("\n", " ") for c in cells) + " |"
 
 
+# render as Markdown; a long table is split by rows and every piece repeats the caption and header
 def table_to_chunks(
     html: str,
     *,
@@ -155,10 +153,6 @@ def table_to_chunks(
     footnote: str = "",
     max_chars: int = 3200,
 ) -> List[str]:
-    """Render a table as Markdown, splitting by rows when it exceeds ``max_chars``.
-
-    Every piece repeats the caption and header, and no row is dropped or cut in half.
-    """
     grid, n_header = parse_html_table(html)
     if not grid:
         return []

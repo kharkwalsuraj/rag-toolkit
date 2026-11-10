@@ -1,8 +1,4 @@
-"""Readers for individual MinerU ``content_list_v2`` blocks.
-
-All readers are deliberately tolerant: MinerU's schema has shifted between versions, so
-they look up several key names and fall back to generic text extraction.
-"""
+# Readers for MinerU content_list_v2 blocks. They try several key names because the schema differs between MinerU versions.
 
 from __future__ import annotations
 
