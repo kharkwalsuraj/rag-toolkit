@@ -24,4 +24,4 @@ packages = ["rag"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v -s"  # -s shows the output printed by the example test
+addopts = "-v -s"

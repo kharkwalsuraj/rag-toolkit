@@ -14,3 +14,4 @@ __pycache__/
 # data created by the library and the example test
 rag_workspace/
 tests/data/
+uv.lock
