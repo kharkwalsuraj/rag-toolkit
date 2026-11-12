@@ -1,7 +1,3 @@
-# rag-toolkit
-
-PDFs in, answers out.
-
 ## Lore
 
 This repo is a major project, and ngl it is not the project I wanted to build.
@@ -28,7 +24,3 @@ results = rag.ingest("manual.pdf")
 answer = rag.ask("What is the supply voltage?")
 print(answer.text)
 ```
-
-## License
-
-MIT, see [LICENSE](LICENSE).
