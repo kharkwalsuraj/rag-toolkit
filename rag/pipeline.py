@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-import dataclasses
 import logging
-from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
-from typing import List, Optional, Sequence
 
 from .chunking import Chunker, ChunkerConfig
-from .config import Settings
+from .core import Answer, IngestResult, Settings
 from .embedder import LocalEmbedder
-from .exceptions import ConfigError, RAGError
-from .llm import FIGURE_PROMPT, GeminiLLM, build_rag_prompt
-from .schemas import Answer, Chunk, IngestResult, ParsedDocument, SearchResult
-from .parser import MinerUClient, load_mineru_output
+from .llm import GeminiLLM
+from .parser import MinerUClient, make_doc_id
 from .reranker import LocalReranker
 from .store import QdrantStore
 
@@ -20,15 +16,10 @@ log = logging.getLogger("rag")
 
 
 class RAGPipeline:
-    """PDF in, answers out: parse, chunk, embed, store, retrieve, rerank and answer.
-
-        rag = RAGPipeline.from_settings(Settings(mineru_token="...", gemini_api_key="..."))
-        rag.ingest("manual.pdf")
-        answer = rag.ask("What is the supply voltage?")
-    """
-
-    def __init__(self, settings: Settings) -> None:
-        s = settings
+    def __init__(self, settings: Settings | None = None) -> None:
+        s = settings or Settings()
+        if s.describe_figures and not s.gemini_api_key:
+            raise ValueError("describe_figures needs gemini_api_key in Settings")
         self.settings = s
         self.parser = MinerUClient(
             s.mineru_token,
@@ -36,7 +27,7 @@ class RAGPipeline:
             model=s.mineru_model,
             language=s.mineru_language,
             ocr=s.mineru_ocr,
-            workdir=s.parsed_dir,
+            workdir=s.mineru_dir,
             poll_interval=s.mineru_poll_interval,
             timeout=s.mineru_timeout,
         )
@@ -51,111 +42,62 @@ class RAGPipeline:
         )
         self.reranker = LocalReranker(s.reranker_model, device=s.reranker_device, batch_size=s.reranker_batch_size)
         self.store = QdrantStore(
-            collection=s.qdrant_collection, path=s.qdrant_path, url=s.qdrant_url, api_key=s.qdrant_api_key
+            s.qdrant_collection, path=str(s.qdrant_dir), url=s.qdrant_url, api_key=s.qdrant_api_key
         )
-        # without a Gemini key everything works except ask() and describe_figures()
-        self.llm = GeminiLLM(s.gemini_api_key, s.gemini_model, temperature=s.gemini_temperature) if s.gemini_api_key else None
-        self._collection_ready = False
+        self.llm = GeminiLLM(s.gemini_api_key, s.gemini_model, s.gemini_temperature) if s.gemini_api_key else None
 
-    @classmethod
-    def from_settings(cls, settings: Optional[Settings] = None) -> "RAGPipeline":
-        """Build the pipeline. Every Settings field has a default; pass only what you need."""
-        return cls(settings or Settings())
+    def ingest(self, pdfs: str | Path | Sequence[str | Path], *, overwrite: bool = False) -> list[IngestResult]:
+        """Parse, chunk, embed and store PDFs, and return one IngestResult per PDF.
 
-    def parse_and_chunk(self, pdf_path: str | Path, *, force: bool = False) -> List[Chunk]:
-        """Parse a PDF with MinerU (cached after the first time) and split it into chunks."""
-        return self._chunk(self.parser.parse(Path(pdf_path), force=force))
-
-    def ingest(self, pdf_path: str | Path, *, force: bool = False, describe_figures: bool = False) -> IngestResult:
-        """Parse, chunk, embed and store a PDF. Ingesting the same PDF again replaces its chunks."""
-        return self._ingest(self.parser.parse(Path(pdf_path), force=force), describe_figures)
-
-    def ingest_mineru_output(self, path: str | Path, *, describe_figures: bool = False) -> IngestResult:
-        """Ingest a MinerU result that is already on disk (no token needed)."""
-        return self._ingest(load_mineru_output(path), describe_figures)
-
-    def ingest_chunks(self, chunks: Sequence[Chunk]) -> IngestResult:
-        """Embed and store the chunks of one document, replacing any chunks stored for it before."""
-        if not chunks:
-            raise RAGError("No chunks to ingest")
-        self._prepare_collection()
-        self.store.delete_document(chunks[0].doc_id)
-        vectors = self.embedder.embed_documents([c.embedding_text for c in chunks])
-        self.store.upsert(chunks, vectors)
-        by_type = dict(Counter(c.content_type for c in chunks))
-        log.info("Stored %d chunks %s", len(chunks), by_type)
-        return IngestResult(doc_id=chunks[0].doc_id, num_chunks=len(chunks), by_type=by_type)
-
-    def delete_document(self, doc_id: str) -> None:
-        """Remove all chunks of a document."""
-        self._prepare_collection()
-        self.store.delete_document(doc_id)
-
-    def retrieve(
-        self,
-        query: str,
-        top_k: int = 5,
-        *,
-        doc_ids: Optional[Sequence[str]] = None,
-        content_types: Optional[Sequence[str]] = None,
-    ) -> List[SearchResult]:
-        """Dense retrieval from Qdrant (the closest chunks), then rerank them and return the best top_k.
-
-        doc_ids limits retrieval to those documents, content_types to "text", "table", "figure" or "formula".
+        pdfs is a path, a list of paths or a folder. PDFs that are already stored are skipped;
+        overwrite=True processes them again and replaces their MinerU output and chunks.
         """
-        self._prepare_collection()
-        vector = self.embedder.embed_query(query)
+        return [self._ingest_pdf(pdf, overwrite) for pdf in self._pdf_paths(pdfs)]
+
+    def ask(self, question: str, top_k: int = 5, *, doc_ids: Sequence[str] | None = None) -> Answer:
+        """Answer a question from the stored documents and return the answer with its source chunks.
+
+        top_k is the number of chunks given to Gemini; doc_ids limits the search to those documents.
+        """
+        if self.llm is None:
+            raise ValueError("ask needs gemini_api_key in Settings")
         candidates = self.store.dense_search(
-            vector, max(self.settings.rerank_candidates, top_k), doc_ids=doc_ids, content_types=content_types
+            self.embedder.embed_query(question), max(self.settings.rerank_candidates, top_k), doc_ids
         )
-        return self.reranker.rerank(query, candidates, top_k)
+        sources = self.reranker.rerank(question, candidates, top_k)
+        if not sources:
+            return Answer("I could not find anything relevant in the ingested documents.")
+        return Answer(self.llm.answer(question, sources), sources)
 
-    def ask(
-        self,
-        question: str,
-        top_k: int = 5,
-        *,
-        doc_ids: Optional[Sequence[str]] = None,
-        content_types: Optional[Sequence[str]] = None,
-    ) -> Answer:
-        """Search, then have Gemini answer from the best chunks. Needs gemini_api_key."""
-        if self.llm is None:
-            raise ConfigError("ask() needs gemini_api_key in Settings")
-        results = self.retrieve(question, top_k, doc_ids=doc_ids, content_types=content_types)
-        if not results:
-            return Answer("I could not find anything relevant in the ingested documents.", [])
-        system, prompt = build_rag_prompt(question, results)
-        return Answer(text=self.llm.generate(prompt, system=system), sources=results)
+    def _pdf_paths(self, pdfs: str | Path | Sequence[str | Path]) -> list[Path]:
+        items = [pdfs] if isinstance(pdfs, (str, Path)) else list(pdfs)
+        paths: list[Path] = []
+        for item in items:
+            path = Path(item)
+            paths += sorted(path.glob("*.pdf")) if path.is_dir() else [path]
+        if not paths:
+            raise ValueError("No PDF files given")
+        return paths
 
-    def describe_figures(self, chunks: Sequence[Chunk]) -> List[Chunk]:
-        """Ask Gemini to describe each figure image and add the description to its chunk."""
-        if self.llm is None:
-            raise ConfigError("describe_figures() needs gemini_api_key in Settings")
-        described = []
-        for chunk in chunks:
-            if chunk.content_type == "figure" and chunk.image_path and Path(chunk.image_path).is_file():
-                try:
-                    text = self.llm.describe_image(chunk.image_path, FIGURE_PROMPT.format(text=chunk.text))
-                    chunk = dataclasses.replace(chunk, text=f"{chunk.text}\n\nDescription: {text}")
-                except RAGError as exc:
-                    log.warning("Could not describe %s: %s", chunk.chunk_id, exc)
-            described.append(chunk)
-        return described
+    def _ingest_pdf(self, pdf: Path, overwrite: bool) -> IngestResult:
+        doc_id = make_doc_id(pdf)
+        mineru_dir = self.settings.mineru_dir / doc_id
 
-    def _chunk(self, parsed: ParsedDocument) -> List[Chunk]:
-        chunks = self.chunker.chunk(parsed.content_list, doc_id=parsed.doc_id, asset_root=parsed.root)
+        if not overwrite:
+            stored = self.store.count_document(doc_id)
+            if stored:
+                log.info("%s is already stored (%d chunks), skipping", pdf.name, stored)
+                return IngestResult(pdf.name, doc_id, stored, skipped=True, mineru_dir=mineru_dir if mineru_dir.exists() else None)
+
+        parsed = self.parser.parse(pdf, force=overwrite)
+        chunks = self.chunker.chunk(parsed.content_list, doc_id=doc_id, asset_root=parsed.root)
         if not chunks:
-            raise RAGError(f"No chunks were produced for {parsed.doc_id}")
-        return chunks
+            raise ValueError(f"No chunks were produced for {pdf.name}")
+        if self.settings.describe_figures:
+            chunks = self.llm.describe_figures(chunks)
 
-    def _ingest(self, parsed: ParsedDocument, describe_figures: bool) -> IngestResult:
-        chunks = self._chunk(parsed)
-        if describe_figures:
-            chunks = self.describe_figures(chunks)
-        return self.ingest_chunks(chunks)
-
-    def _prepare_collection(self) -> None:
-        # creating the collection needs the vector size, so it waits until the embedder is first used
-        if not self._collection_ready:
-            self.store.ensure_collection(self.embedder.dim)
-            self._collection_ready = True
+        vectors = self.embedder.embed_documents([c.embedding_text for c in chunks])
+        self.store.delete_document(doc_id)
+        self.store.upsert(chunks, vectors)
+        log.info("Stored %d chunks of %s", len(chunks), pdf.name)
+        return IngestResult(pdf.name, doc_id, len(chunks), mineru_dir=mineru_dir)

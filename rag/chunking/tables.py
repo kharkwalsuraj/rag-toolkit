@@ -4,7 +4,6 @@ import html as html_lib
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from typing import Dict, List, Optional, Tuple
 
 from .text_utils import clean
 
@@ -17,7 +16,7 @@ class _Cell:
     header: bool
 
 
-def _span(attrs: Dict[str, Optional[str]], name: str) -> int:
+def _span(attrs: dict[str, str | None], name: str) -> int:
     try:
         return max(1, min(int(str(attrs.get(name) or 1).strip()), 100))
     except ValueError:
@@ -27,10 +26,10 @@ def _span(attrs: Dict[str, Optional[str]], name: str) -> int:
 class _TableParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.rows: List[List[_Cell]] = []
-        self._row: Optional[List[_Cell]] = None
-        self._cell: Optional[Tuple[bool, int, int]] = None  # (header, rowspan, colspan)
-        self._buf: List[str] = []
+        self.rows: list[list[_Cell]] = []
+        self._row: list[_Cell] | None = None
+        self._cell: tuple[bool, int, int] | None = None
+        self._buf: list[str] = []
         self._depth = 0
 
     def handle_starttag(self, tag, attrs):
@@ -77,12 +76,11 @@ class _TableParser(HTMLParser):
         self._end_row()
 
 
-# fill rowspan and colspan into a rectangular grid (spanned cells repeat their text)
-def _expand(rows: List[List[_Cell]]) -> List[List[str]]:
-    carry: Dict[int, List] = {}  # column -> [text, remaining_rows]
-    grid: List[List[str]] = []
+def _expand(rows: list[list[_Cell]]) -> list[list[str]]:
+    carry: dict[int, List] = {}
+    grid: list[list[str]] = []
     for cells in rows:
-        out: List[str] = []
+        out: list[str] = []
         col = 0
 
         def drain() -> None:
@@ -109,7 +107,7 @@ def _expand(rows: List[List[_Cell]]) -> List[List[str]]:
     return [r + [""] * (width - len(r)) for r in grid]
 
 
-def parse_html_table(html: str) -> Tuple[List[List[str]], int]:
+def parse_html_table(html: str) -> tuple[list[list[str]], int]:
     parser = _TableParser()
     parser.feed(html)
     parser.close()
@@ -129,10 +127,10 @@ def html_to_text(html: str) -> str:
     return clean(html_lib.unescape(re.sub(r"<[^>]+>", " ", html)))
 
 
-def _merge_headers(header_rows: List[List[str]]) -> List[str]:
-    merged: List[str] = []
+def _merge_headers(header_rows: list[list[str]]) -> list[str]:
+    merged: list[str] = []
     for col in range(len(header_rows[0])):
-        seen: List[str] = []
+        seen: list[str] = []
         for row in header_rows:
             value = row[col]
             if value and value not in seen:
@@ -141,18 +139,17 @@ def _merge_headers(header_rows: List[List[str]]) -> List[str]:
     return merged
 
 
-def _md_row(cells: List[str]) -> str:
+def _md_row(cells: list[str]) -> str:
     return "| " + " | ".join(c.replace("|", "\\|").replace("\n", " ") for c in cells) + " |"
 
 
-# render as Markdown; a long table is split by rows and every piece repeats the caption and header
 def table_to_chunks(
     html: str,
     *,
     caption: str = "",
     footnote: str = "",
     max_chars: int = 3200,
-) -> List[str]:
+) -> list[str]:
     grid, n_header = parse_html_table(html)
     if not grid:
         return []
@@ -162,15 +159,15 @@ def table_to_chunks(
     prefix = f"{caption}\n\n" if caption else ""
     suffix = f"\n\n{footnote}" if footnote else ""
 
-    def assemble(lines: List[str]) -> str:
+    def assemble(lines: list[str]) -> str:
         return prefix + "\n".join(head_lines + lines)
 
     if not body:
         return [assemble([]) + suffix]
 
     base = len(prefix) + sum(len(line) + 1 for line in head_lines)
-    pieces: List[str] = []
-    current: List[str] = []
+    pieces: list[str] = []
+    current: list[str] = []
     size = base
     for row in body:
         line = _md_row(row)

@@ -11,6 +11,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# runtime data created by the library and the CLI
-.rag_data/
-chunks.jsonl
+# data created by the library and the example test
+rag_workspace/
+tests/data/

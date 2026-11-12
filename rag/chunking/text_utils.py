@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Any, List
+from typing import Any
 
 _IGNORED_KEYS = {"bbox", "path", "image_source", "img_path", "image_path", "sub_type", "anchor"}
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(\[])")
@@ -20,7 +20,6 @@ def clean(text: str) -> str:
     return text.strip()
 
 
-# join MinerU text spans (lists of {type, content}) into one string
 def spans_to_text(value: Any) -> str:
     if value is None:
         return ""
@@ -45,8 +44,8 @@ def spans_to_text(value: Any) -> str:
     return ""
 
 
-def _hard_split(text: str, max_chars: int) -> List[str]:
-    pieces: List[str] = []
+def _hard_split(text: str, max_chars: int) -> list[str]:
+    pieces: list[str] = []
     while len(text) > max_chars:
         cut = text.rfind(" ", 0, max_chars)
         if cut < max_chars // 2:
@@ -58,8 +57,7 @@ def _hard_split(text: str, max_chars: int) -> List[str]:
     return pieces
 
 
-# split on line or sentence boundaries into pieces of at most max_chars
-def split_text(text: str, max_chars: int) -> List[str]:
+def split_text(text: str, max_chars: int) -> list[str]:
     text = text.strip()
     if not text:
         return []
@@ -70,7 +68,7 @@ def split_text(text: str, max_chars: int) -> List[str]:
     joiner = "\n" if by_lines else " "
     units = text.split("\n") if by_lines else _SENTENCE_BREAK.split(text)
 
-    expanded: List[str] = []
+    expanded: list[str] = []
     for unit in units:
         unit = unit.strip()
         if not unit:
@@ -80,7 +78,7 @@ def split_text(text: str, max_chars: int) -> List[str]:
         else:
             expanded.append(unit)
 
-    pieces: List[str] = []
+    pieces: list[str] = []
     current = ""
     for unit in expanded:
         if current and len(current) + len(joiner) + len(unit) > max_chars:

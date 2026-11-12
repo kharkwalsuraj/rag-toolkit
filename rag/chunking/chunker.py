@@ -4,10 +4,9 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any
 
-from ..exceptions import RAGError
-from ..schemas import Chunk, ParsedDocument
+from ..core import Chunk, ParsedDocument
 from . import blocks as B
 from .tables import html_to_text, table_to_chunks
 from .text_utils import clean, split_text
@@ -17,11 +16,11 @@ log = logging.getLogger("rag.chunking")
 
 @dataclass(frozen=True)
 class ChunkerConfig:
-    text_max_tokens: int = 400  # merge small paragraphs up to this size
-    table_max_tokens: int = 300  # long tables are split by rows beyond this (models read ~512 tokens)
-    context_chars: int = 300  # nearby text attached to figures/formulas (0 = off)
-    section_path: bool = True  # section titles as a path: "Chapter > Section"
-    skip_sections: Tuple[str, ...] = (
+    text_max_tokens: int = 400
+    table_max_tokens: int = 300
+    context_chars: int = 300
+    section_path: bool = True
+    skip_sections: tuple[str, ...] = (
         r"^(table of )?contents$",
         r"^(revision|document|change) history$",
     )
@@ -36,7 +35,7 @@ class ChunkerConfig:
 
 
 class Chunker:
-    def __init__(self, config: Optional[ChunkerConfig] = None) -> None:
+    def __init__(self, config: ChunkerConfig | None = None) -> None:
         self.config = config or ChunkerConfig()
 
     def chunk(
@@ -44,12 +43,12 @@ class Chunker:
         content_list: list,
         *,
         doc_id: str,
-        asset_root: Optional[Union[str, Path]] = None,
-    ) -> List[Chunk]:
+        asset_root: str | Path | None = None,
+    ) -> list[Chunk]:
         if not isinstance(content_list, list):
-            raise RAGError("content_list must be a list (expected MinerU content_list_v2.json)")
+            raise ValueError("content_list must be a list (expected MinerU content_list_v2.json)")
         if content_list and not all(isinstance(page, list) for page in content_list):
-            raise RAGError(
+            raise ValueError(
                 "Unexpected structure: content_list_v2 is a list of pages, each a list of blocks."
             )
         run = _Run(doc_id, self.config, Path(asset_root) if asset_root else None)
@@ -64,30 +63,29 @@ class Chunker:
 def chunk_content_list(
     content_list: list,
     doc_id: str,
-    asset_root: Optional[Union[str, Path]] = None,
-    config: Optional[ChunkerConfig] = None,
-) -> List[Chunk]:
+    asset_root: str | Path | None = None,
+    config: ChunkerConfig | None = None,
+) -> list[Chunk]:
     return Chunker(config).chunk(content_list, doc_id=doc_id, asset_root=asset_root)
 
 
-def chunk_parsed(parsed: ParsedDocument, config: Optional[ChunkerConfig] = None) -> List[Chunk]:
+def chunk_parsed(parsed: ParsedDocument, config: ChunkerConfig | None = None) -> list[Chunk]:
     return Chunker(config).chunk(parsed.content_list, doc_id=parsed.doc_id, asset_root=parsed.root)
 
 
-# state for one chunking pass
 class _Run:
-    def __init__(self, doc_id: str, cfg: ChunkerConfig, asset_root: Optional[Path]) -> None:
+    def __init__(self, doc_id: str, cfg: ChunkerConfig, asset_root: Path | None) -> None:
         self.doc_id = doc_id
         self.cfg = cfg
         self.asset_root = asset_root
-        self.chunks: List[Chunk] = []
+        self.chunks: list[Chunk] = []
         self.page = 1
         self._counter = 0
-        self._stack: List[Tuple[int, str]] = []
+        self._stack: list[tuple[int, str]] = []
         self._skipping = False
-        self._buffer: List[str] = []
+        self._buffer: list[str] = []
         self._buffer_chars = 0
-        self._recent = ""  # last paragraph, used as context for figures/formulas
+        self._recent = ""
         self._skip_patterns = [re.compile(p, re.I) for p in cfg.skip_sections]
         self._warned_types: set = set()
         self._handlers = {
@@ -106,9 +104,8 @@ class _Run:
             "page_footnote": self._footnote,
         }
 
-    # driver
     def set_page(self, page: int) -> None:
-        self.flush()  # text is merged only within one page and section
+        self.flush()
         self.page = page
 
     def handle(self, block: Any) -> None:
@@ -129,7 +126,6 @@ class _Run:
             handler = self._paragraph
         handler(content)
 
-    # section tracking
     @property
     def section(self) -> str:
         if not self._stack:
@@ -149,7 +145,6 @@ class _Run:
         self._skipping = any(p.search(text) for p in self._skip_patterns)
         self._recent = ""
 
-    # text-like blocks
     def _paragraph(self, content: Any) -> None:
         text = B.paragraph_text(content)
         if text:
@@ -196,7 +191,6 @@ class _Run:
         self._buffer, self._buffer_chars = [], 0
         self._emit("text", text)
 
-    # structured blocks
     def _table(self, content: Any) -> None:
         self.flush()
         caption = B.caption_text(content)
@@ -207,7 +201,7 @@ class _Run:
             if html
             else []
         )
-        if not pieces:  # not parseable as a table: keep whatever text is available
+        if not pieces:
             fallback = "\n\n".join(p for p in (caption, html_to_text(html) if html else "", footnote) if p)
             pieces = [fallback] if fallback else []
         image = B.image_rel_path(content)
@@ -220,7 +214,7 @@ class _Run:
         context = self._recent[-self.cfg.context_chars:] if self.cfg.context_chars else ""
         if context:
             lines.append(f"Nearby text: {context}")
-        if not lines:  # never drop a figure, even with no caption
+        if not lines:
             where = f" in section '{self.section}'" if self.section else ""
             lines.append(f"Figure on page {self.page}{where}")
         self._emit("figure", "\n".join(lines), B.image_rel_path(content))
@@ -234,8 +228,7 @@ class _Run:
         context = self._recent[-self.cfg.context_chars:] if self.cfg.context_chars else ""
         self._emit("formula", f"{context}\n\n{text}" if context else text, B.image_rel_path(content))
 
-    # output
-    def _emit(self, content_type: str, text: str, image: Optional[str] = None) -> None:
+    def _emit(self, content_type: str, text: str, image: str | None = None) -> None:
         text = clean(text) if content_type in ("figure", "formula") else text.strip()
         if not text:
             return

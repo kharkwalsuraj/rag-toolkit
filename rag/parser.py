@@ -1,40 +1,54 @@
-# MinerU cloud client. A PDF is uploaded, polled until done, downloaded and unzipped into
-# workdir/<doc_id>/, which also serves as the cache.
-
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 import shutil
 import tempfile
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any
 
 import requests
 
-from .exceptions import ConfigError, RAGError
-from .schemas import ParsedDocument
-from .utils import make_doc_id, slugify
+from .core import ParsedDocument
 
 log = logging.getLogger("rag.parser")
 
 DEFAULT_BASE_URL = "https://mineru.net/api/v4"
-MAX_FILE_BYTES = 200 * 1024 * 1024  # MinerU's per-file limit
+MAX_FILE_BYTES = 200 * 1024 * 1024
 MAX_ZIP_BYTES = 2 * 1024 ** 3
 _MARKER = ".complete"
 
 
+def slugify(text: str, max_len: int = 48) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", text).strip("-").lower()[:max_len].strip("-")
+    return slug or "doc"
 
-def load_mineru_output(path: Union[str, Path], doc_id: Optional[str] = None) -> ParsedDocument:
+
+def file_sha256(path: str | Path, block_size: int = 1 << 20) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(block_size), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def make_doc_id(path: str | Path) -> str:
+    p = Path(path)
+    return f"{slugify(p.stem)}_{file_sha256(p)[:8]}"
+
+
+def load_mineru_output(path: str | Path, doc_id: str | None = None) -> ParsedDocument:
     path = Path(path)
     if path.is_file():
         content_file = path
     else:
         candidates = sorted(path.rglob("*content_list_v2.json"))
         if len(candidates) != 1:
-            raise RAGError(
+            raise ValueError(
                 f"Expected exactly one *content_list_v2.json under {path}, found {len(candidates)}"
             )
         content_file = candidates[0]
@@ -42,7 +56,7 @@ def load_mineru_output(path: Union[str, Path], doc_id: Optional[str] = None) -> 
     try:
         content_list = json.loads(content_file.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise RAGError(f"Cannot read {content_file}: {exc}") from exc
+        raise RuntimeError(f"Cannot read {content_file}: {exc}") from exc
 
     root = content_file.parent
     markdown_files = sorted(root.glob("full.md")) or sorted(root.glob("*.md"))
@@ -58,13 +72,13 @@ def load_mineru_output(path: Union[str, Path], doc_id: Optional[str] = None) -> 
 class MinerUClient:
     def __init__(
         self,
-        token: Optional[str],
+        token: str | None,
         *,
         base_url: str = DEFAULT_BASE_URL,
         model: str = "vlm",
         language: str = "en",
         ocr: bool = False,
-        workdir: Union[str, Path] = ".rag_data/parsed",
+        workdir: str | Path = ".rag_data/parsed",
         poll_interval: float = 5.0,
         timeout: float = 1800.0,
     ) -> None:
@@ -78,8 +92,7 @@ class MinerUClient:
         self.timeout = timeout
         self._session = requests.Session()
 
-    # public
-    def parse(self, pdf_path: Union[str, Path], *, force: bool = False) -> ParsedDocument:
+    def parse(self, pdf_path: str | Path, *, force: bool = False) -> ParsedDocument:
         pdf = Path(pdf_path)
         self._validate_pdf(pdf)
         doc_id = make_doc_id(pdf)
@@ -89,7 +102,7 @@ class MinerUClient:
             log.info(f"Using cached MinerU result for {pdf.name}")
             return load_mineru_output(out_dir, doc_id=doc_id)
         if not self.token:
-            raise ConfigError("No MinerU token given. Set mineru_token in Settings (https://mineru.net/apiManage)")
+            raise ValueError("No MinerU token given. Set mineru_token in Settings (https://mineru.net/apiManage)")
 
         self.workdir.mkdir(parents=True, exist_ok=True)
         batch_id, upload_url = self._request_upload(pdf, doc_id)
@@ -102,7 +115,7 @@ class MinerUClient:
             self._download(entry["full_zip_url"], zip_path)
             extracted = Path(tmp) / "extracted"
             _safe_extract(zip_path, extracted)
-            load_mineru_output(extracted, doc_id=doc_id)  # validates before we publish it
+            load_mineru_output(extracted, doc_id=doc_id)
             (extracted / "mineru_acquisition.json").write_text(
                 json.dumps({"batch_id": batch_id, "source": pdf.name, "model": self.model}, indent=2)
             )
@@ -114,19 +127,18 @@ class MinerUClient:
         log.info(f"MinerU parsing finished for {pdf.name}")
         return load_mineru_output(out_dir, doc_id=doc_id)
 
-    # API calls
     @property
-    def _auth(self) -> Dict[str, str]:
+    def _auth(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"}
 
-    def _api(self, method: str, path: str, **kwargs: Any) -> Dict[str, Any]:
+    def _api(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         resp = self._http(method, f"{self.base_url}{path}", headers=self._auth, **kwargs)
         try:
             payload = resp.json()
         except ValueError as exc:
-            raise RAGError(f"MinerU returned non-JSON response for {path}") from exc
+            raise RuntimeError(f"MinerU returned non-JSON response for {path}") from exc
         if payload.get("code") not in (0, "0"):
-            raise RAGError(f"MinerU API error {payload.get('code')}: {payload.get('msg')}")
+            raise RuntimeError(f"MinerU API error {payload.get('code')}: {payload.get('msg')}")
         return payload.get("data") or {}
 
     def _request_upload(self, pdf: Path, doc_id: str):
@@ -143,23 +155,23 @@ class MinerUClient:
         )
         urls = data.get("file_urls") or []
         if not data.get("batch_id") or not urls:
-            raise RAGError("MinerU did not return an upload URL")
+            raise RuntimeError("MinerU did not return an upload URL")
         return data["batch_id"], urls[0]
 
     def _upload(self, pdf: Path, url: str, attempts: int = 3) -> None:
-        last: Optional[Exception] = None
+        last: Exception | None = None
         for attempt in range(attempts):
             try:
-                with open(pdf, "rb") as fh:  # presigned URL: no auth header, no content-type
+                with open(pdf, "rb") as fh:
                     resp = self._session.put(url, data=fh, timeout=(30, 900))
                 resp.raise_for_status()
                 return
             except requests.RequestException as exc:
                 last = exc
                 time.sleep(min(2 ** attempt, 10))
-        raise RAGError(f"Upload failed after {attempts} attempts: {last}") from last
+        raise RuntimeError(f"Upload failed after {attempts} attempts: {last}") from last
 
-    def _wait(self, batch_id: str, doc_id: str) -> Dict[str, Any]:
+    def _wait(self, batch_id: str, doc_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout
         last_msg = ""
         while True:
@@ -169,7 +181,7 @@ class MinerUClient:
             if entry:
                 state = entry.get("state")
                 if state == "failed":
-                    raise RAGError(f"MinerU failed to parse the file: {entry.get('err_msg')}")
+                    raise RuntimeError(f"MinerU failed to parse the file: {entry.get('err_msg')}")
                 if state == "done" and entry.get("full_zip_url"):
                     return entry
                 progress = entry.get("extract_progress") or {}
@@ -180,11 +192,11 @@ class MinerUClient:
                     log.info(msg)
                     last_msg = msg
             if time.monotonic() > deadline:
-                raise RAGError(f"Timed out after {self.timeout:.0f}s waiting for MinerU")
+                raise RuntimeError(f"Timed out after {self.timeout:.0f}s waiting for MinerU")
             time.sleep(self.poll_interval)
 
     def _download(self, url: str, dest: Path, attempts: int = 3) -> None:
-        last: Optional[Exception] = None
+        last: Exception | None = None
         for attempt in range(attempts):
             try:
                 with self._session.get(url, stream=True, timeout=(30, 300)) as resp:
@@ -194,16 +206,16 @@ class MinerUClient:
                         for block in resp.iter_content(1 << 20):
                             size += len(block)
                             if size > MAX_ZIP_BYTES:
-                                raise RAGError("Result zip is unexpectedly large")
+                                raise RuntimeError("Result zip is unexpectedly large")
                             fh.write(block)
                 return
-            except requests.RequestException as exc:  # result zip can be briefly unavailable
+            except requests.RequestException as exc:
                 last = exc
                 time.sleep(min(2 ** attempt * 2, 20))
-        raise RAGError(f"Could not download MinerU result: {last}") from last
+        raise RuntimeError(f"Could not download MinerU result: {last}") from last
 
     def _http(self, method: str, url: str, attempts: int = 3, **kwargs: Any) -> requests.Response:
-        last: Optional[Exception] = None
+        last: Exception | None = None
         for attempt in range(attempts):
             try:
                 resp = self._session.request(method, url, timeout=60, **kwargs)
@@ -214,19 +226,18 @@ class MinerUClient:
             except requests.RequestException as exc:
                 last = exc
                 time.sleep(min(2 ** attempt, 10))
-        raise RAGError(f"Request to MinerU failed after {attempts} attempts: {last}") from last
+        raise RuntimeError(f"Request to MinerU failed after {attempts} attempts: {last}") from last
 
     @staticmethod
     def _validate_pdf(pdf: Path) -> None:
         if not pdf.is_file():
-            raise RAGError(f"File not found: {pdf}")
+            raise FileNotFoundError(f"File not found: {pdf}")
         if pdf.suffix.lower() != ".pdf":
-            raise RAGError(f"Only PDF files are supported: {pdf.name}")
+            raise ValueError(f"Only PDF files are supported: {pdf.name}")
         if pdf.stat().st_size > MAX_FILE_BYTES:
-            raise RAGError(f"{pdf.name} exceeds MinerU's 200 MB limit; split it first")
+            raise ValueError(f"{pdf.name} exceeds MinerU's 200 MB limit; split it first")
 
 
-# reject path traversal, symlinks and oversized archives
 def _safe_extract(zip_path: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     root = dest.resolve()
@@ -235,10 +246,10 @@ def _safe_extract(zip_path: Path, dest: Path) -> None:
         for info in zf.infolist():
             target = (dest / info.filename).resolve()
             if root != target and root not in target.parents:
-                raise RAGError(f"Unsafe path in result zip: {info.filename}")
+                raise RuntimeError(f"Unsafe path in result zip: {info.filename}")
             if (info.external_attr >> 16) & 0o170000 == 0o120000:
-                raise RAGError(f"Symlink in result zip: {info.filename}")
+                raise RuntimeError(f"Symlink in result zip: {info.filename}")
             total += info.file_size
             if total > MAX_ZIP_BYTES:
-                raise RAGError("Result zip expands to an unexpected size")
+                raise RuntimeError("Result zip expands to an unexpected size")
         zf.extractall(dest)

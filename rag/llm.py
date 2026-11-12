@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import dataclasses
+import logging
 import mimetypes
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Optional, Sequence, Tuple
 
 from google import genai
 from google.genai import types
 
-from .exceptions import ConfigError, RAGError
-from .schemas import SearchResult
+from .core import Chunk, SearchResult
+
+log = logging.getLogger("rag.llm")
 
 RAG_SYSTEM = (
     "You answer questions strictly from the numbered context passages provided. "
@@ -24,71 +27,45 @@ FIGURE_PROMPT = (
 )
 
 
-def format_context(results: Sequence[SearchResult]) -> str:
-    blocks = []
-    for i, r in enumerate(results, 1):
-        c = r.chunk
-        where = f"{c.doc_id}, page {c.page_no}"
-        if c.section_title:
-            where += f", section: {c.section_title}"
-        blocks.append(f"[{i}] ({where}, {c.content_type})\n{c.text}")
-    return "\n\n".join(blocks)
-
-
-def build_rag_prompt(question: str, results: Sequence[SearchResult]) -> Tuple[str, str]:
-    prompt = f"Context:\n{format_context(results)}\n\nQuestion: {question}\n\nAnswer:"
-    return RAG_SYSTEM, prompt
-
-
 class GeminiLLM:
-    def __init__(
-        self,
-        api_key: Optional[str],
-        model: str = "gemini-2.5-flash",
-        *,
-        temperature: float = 0.2,
-    ) -> None:
-        if not api_key:
-            raise ConfigError("No Gemini API key given. Set gemini_api_key in Settings.")
+    def __init__(self, api_key: str, model: str = "gemini-2.5-flash", temperature: float = 0.2) -> None:
+        self.client = genai.Client(api_key=api_key)
         self.model = model
         self.temperature = temperature
-        self._api_key = api_key
-        self._client = None
 
-    @property
-    def client(self):
-        if self._client is None:
+    def answer(self, question: str, sources: Sequence[SearchResult]) -> str:
+        blocks = []
+        for i, source in enumerate(sources, 1):
+            chunk = source.chunk
+            where = f"{chunk.doc_id}, page {chunk.page_no}"
+            if chunk.section_title:
+                where += f", section: {chunk.section_title}"
+            blocks.append(f"[{i}] ({where}, {chunk.content_type})\n{chunk.text}")
+        prompt = "Context:\n" + "\n\n".join(blocks) + f"\n\nQuestion: {question}\n\nAnswer:"
+        return self._generate(prompt, system=RAG_SYSTEM)
 
-            self._client = genai.Client(api_key=self._api_key)
-        return self._client
+    def describe_figures(self, chunks: Sequence[Chunk]) -> list[Chunk]:
+        described = []
+        for chunk in chunks:
+            if chunk.content_type == "figure" and chunk.image_path and Path(chunk.image_path).is_file():
+                try:
+                    description = self._generate(FIGURE_PROMPT.format(text=chunk.text), image=Path(chunk.image_path))
+                    chunk = dataclasses.replace(chunk, text=f"{chunk.text}\n\nDescription: {description}")
+                except RuntimeError as exc:
+                    log.warning("Could not describe %s: %s", chunk.chunk_id, exc)
+            described.append(chunk)
+        return described
 
-    def _config(self, system: Optional[str]):
-
-        return types.GenerateContentConfig(
-            system_instruction=system,
-            temperature=self.temperature,
-        )
-
-    def generate(self, prompt: str, *, system: Optional[str] = None) -> str:
+    def _generate(self, prompt: str, system: str | None = None, image: Path | None = None) -> str:
+        contents = prompt
+        if image is not None:
+            mime_type = mimetypes.guess_type(image.name)[0] or "image/jpeg"
+            contents = [types.Part.from_bytes(data=image.read_bytes(), mime_type=mime_type), prompt]
+        config = types.GenerateContentConfig(system_instruction=system, temperature=self.temperature)
         try:
-            response = self.client.models.generate_content(
-                model=self.model, contents=prompt, config=self._config(system)
-            )
+            response = self.client.models.generate_content(model=self.model, contents=contents, config=config)
         except Exception as exc:
-            raise RAGError(f"Gemini request failed: {exc}") from exc
+            raise RuntimeError(f"Gemini request failed: {exc}") from exc
         if not response.text:
-            raise RAGError("Gemini returned an empty response (it may have been blocked)")
-        return response.text
-
-    def describe_image(self, image_path: str, prompt: str) -> str:
-
-        path = Path(image_path)
-        mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
-        try:
-            part = types.Part.from_bytes(data=path.read_bytes(), mime_type=mime)
-            response = self.client.models.generate_content(
-                model=self.model, contents=[part, prompt], config=self._config(None)
-            )
-        except Exception as exc:
-            raise RAGError(f"Gemini image description failed: {exc}") from exc
-        return (response.text or "").strip()
+            raise RuntimeError("Gemini returned an empty response (it may have been blocked)")
+        return response.text.strip()
